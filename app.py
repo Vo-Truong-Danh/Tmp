@@ -5,72 +5,94 @@ import pickle
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Layer
+import tensorflow as tf
 
-# --- CÁC HÀM TẢI MÔ HÌNH VÀ TOKENIZER (Sử dụng cache để tối ưu) ---
+# --- PHẦN QUAN TRỌNG: ĐỊNH NGHĨA LỚP ATTENTION ---
+# Keras không biết lớp 'Attention' là gì, chúng ta cần định nghĩa nó ở đây.
+# Đây là một kiến trúc Attention phổ biến, rất có thể mô hình của bạn đã dùng nó.
+class Attention(Layer):
+    def __init__(self, **kwargs):
+        super(Attention, self).__init__(**kwargs)
 
+    def build(self, input_shape):
+        self.W = self.add_weight(name="att_weight", shape=(input_shape[-1], 1), initializer="normal")
+        self.b = self.add_weight(name="att_bias", shape=(input_shape[1], 1), initializer="zeros")
+        super(Attention, self).build(input_shape)
+
+    def call(self, x):
+        et = tf.keras.backend.squeeze(tf.keras.backend.tanh(tf.keras.backend.dot(x, self.W) + self.b), axis=-1)
+        at = tf.keras.backend.softmax(et)
+        at = tf.keras.backend.expand_dims(at, axis=-1)
+        output = x * at
+        return tf.keras.backend.sum(output, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[-1])
+
+    def get_config(self):
+        return super(Attention, self).get_config()
+
+# --- CÁC HÀM XỬ LÝ ---
+
+# Hàm tải các model và tokenizer (được cache lại để chạy nhanh hơn)
 @st.cache_resource
-def load_models_and_tokenizer():
-    """Tải mô hình tạo chú thích, mô hình ResNet50 để trích xuất đặc trưng và tokenizer."""
+def load_all_models():
+    # Khai báo lớp Attention là một custom object
+    custom_objects = {'Attention': Attention}
     
     # Tải mô hình chính
     try:
-        caption_model = load_model('best_model_with_attention.h5')
+        model = load_model('best_model_with_attention.h5', custom_objects=custom_objects)
     except Exception as e:
-        st.error(f"Lỗi khi tải file 'best_model_with_attention.h5': {e}")
-        st.error("Vui lòng đảm bảo file mô hình đã được tải về và đặt đúng trong thư mục.")
+        st.error(f"Lỗi khi tải file model 'best_model_with_attention.h5': {e}")
+        st.info("Hãy chắc chắn rằng bạn đã định nghĩa đúng lớp Attention hoặc mô hình không bị lỗi.")
         return None, None, None
 
     # Tải tokenizer
     try:
         with open('tokenizer.pkl', 'rb') as f:
             tokenizer = pickle.load(f)
-    except Exception as e:
-        st.error(f"Lỗi khi tải file 'tokenizer.pkl': {e}")
-        st.error("Vui lòng đảm bảo file tokenizer đã được tải về và đặt đúng trong thư mục.")
+    except FileNotFoundError:
+        st.error("Không tìm thấy file 'tokenizer.pkl'. Vui lòng tải file lên.")
         return None, None, None
         
-    # Tải mô hình ResNet50 để trích xuất đặc trưng
-    resnet_model = ResNet50(weights='imagenet')
-    feature_extractor = Model(inputs=resnet_model.inputs, outputs=resnet_model.layers[-2].output)
+    # Tải mô hình ResNet50 để trích xuất đặc trưng ảnh
+    feature_model = ResNet50(weights='imagenet')
+    # Bỏ lớp cuối cùng để lấy vector đặc trưng
+    feature_model = tf.keras.Model(inputs=feature_model.inputs, outputs=feature_model.layers[-2].output)
     
-    return caption_model, feature_extractor, tokenizer
+    return model, tokenizer, feature_model
 
-# --- CÁC HÀM XỬ LÝ (Lấy từ notebook) ---
-
-def extract_feature_from_image(feature_extractor, image):
-    """Trích xuất vector đặc trưng từ một ảnh."""
+def extract_feature(image, feature_model):
     image = image.resize((224, 224))
     image = np.array(image)
-    
-    # Chuyển ảnh RGB 3 kênh thành 4 chiều để tương thích với mô hình
-    if image.shape[2] == 4: # Xử lý ảnh có kênh alpha (RGBA)
+    # Nếu ảnh có 4 kênh (PNG), bỏ kênh alpha
+    if image.shape[2] == 4:
         image = image[..., :3]
-        
     image = np.expand_dims(image, axis=0)
     image = preprocess_input(image)
-    
-    feature = feature_extractor.predict(image, verbose=0)
+    feature = feature_model.predict(image, verbose=0)
     return feature
 
 def idx_to_word(integer, tokenizer):
-    """Chuyển index thành từ."""
     for word, index in tokenizer.word_index.items():
         if index == integer:
             return word
     return None
 
-def predict_caption(model, image_feature, tokenizer, max_length):
-    """Tạo chú thích cho ảnh từ vector đặc trưng."""
+def predict_caption(model, image_feature, tokenizer, max_length=34):
     in_text = 'startseq'
     for _ in range(max_length):
         sequence = tokenizer.texts_to_sequences([in_text])[0]
         sequence = pad_sequences([sequence], maxlen=max_length)
         
+        # Dự đoán
         yhat = model.predict([image_feature, sequence], verbose=0)
         
-        pred_idx = np.argmax(yhat)
-        word = idx_to_word(pred_idx, tokenizer)
+        # Lấy từ có xác suất cao nhất
+        pred_id = np.argmax(yhat)
+        word = idx_to_word(pred_id, tokenizer)
         
         if word is None:
             break
@@ -80,46 +102,41 @@ def predict_caption(model, image_feature, tokenizer, max_length):
         if word == 'endseq':
             break
             
-    return in_text
+    # Dọn dẹp câu kết quả
+    final_caption = in_text.split()
+    final_caption = final_caption[1:-1] # Bỏ 'startseq' và 'endseq'
+    final_caption = ' '.join(final_caption)
+    return final_caption.capitalize() + '.'
 
-# --- GIAO DIỆN ỨNG DỤNG STREAMLIT ---
+# --- GIAO DIỆN STREAMLIT ---
+st.set_page_config(page_title="Chuyển đổi Hình ảnh thành Văn bản", layout="centered")
 
-st.set_page_config(page_title="Tạo Chú Thích Ảnh Tiếng Việt", layout="centered")
+st.title("️Chuyển đổi Hình ảnh thành Văn bản 🖼️➡️📝")
+st.write("Tải lên một hình ảnh và mô hình sẽ tạo ra một chú thích mô tả nội dung của ảnh.")
 
-st.title("️🖼️ Tạo Chú Thích Ảnh Tiếng Việt")
-st.write("Tải lên một hình ảnh và mô hình sẽ tự động tạo ra một chú thích bằng tiếng Việt mô tả nội dung của ảnh đó.")
-st.write("---")
+# Tải model
+model, tokenizer, feature_model = load_all_models()
 
-# Tải các mô hình và tokenizer
-caption_model, feature_extractor, tokenizer = load_models_and_tokenizer()
+uploaded_file = st.file_uploader("Chọn một file ảnh...", type=["jpg", "jpeg", "png"])
 
-# Kiểm tra nếu tải mô hình thành công
-if caption_model and feature_extractor and tokenizer:
-    uploaded_file = st.file_uploader("Chọn một file ảnh...", type=["jpg", "jpeg", "png"])
+if uploaded_file is not None and model is not None:
+    # Hiển thị ảnh đã tải lên
+    image = Image.open(uploaded_file)
+    st.image(image, caption='Ảnh bạn đã tải lên', use_column_width=True)
+    st.write("")
 
-    if uploaded_file is not None:
-        # Hiển thị ảnh đã tải lên
-        image = Image.open(uploaded_file)
-        st.image(image, caption='Ảnh đã tải lên', use_column_width=True)
-        
-        st.write("")
-        
-        # Tạo chú thích khi nhấn nút
-        if st.button('Tạo chú thích'):
-            with st.spinner('Đang xử lý và tạo chú thích...'):
-                max_length = 41 # Giá trị này được xác định trong notebook
-                
-                # Trích xuất đặc trưng ảnh
-                photo_feature = extract_feature_from_image(feature_extractor, image)
-                
-                # Tạo chú thích
-                generated_caption = predict_caption(caption_model, photo_feature, tokenizer, max_length)
-                
-                # Xử lý chuỗi kết quả cho đẹp
-                final_caption = generated_caption.replace('startseq', '').replace('endseq', '').strip().capitalize()
-                
-                st.success('Đã tạo xong!')
-                st.subheader('**Chú thích được tạo:**')
-                st.write(f"### *{final_caption}*")
+    if st.button('Tạo Chú Thích', use_container_width=True):
+        with st.spinner('Mô hình đang phân tích ảnh, vui lòng chờ...'):
+            # Trích xuất đặc trưng ảnh
+            image_feature = extract_feature(image, feature_model)
+            
+            # Tạo chú thích
+            caption = predict_caption(model, image_feature, tokenizer)
+            
+            st.subheader("Chú thích được tạo ra:")
+            st.success(caption)
 else:
-    st.warning("Ứng dụng chưa sẵn sàng do không tải được mô hình hoặc tokenizer. Vui lòng kiểm tra lại file.")
+    if model is None:
+        st.warning("Không thể tải được mô hình. Vui lòng kiểm tra lại file.")
+    else:
+        st.info("Vui lòng tải ảnh lên để bắt đầu.")

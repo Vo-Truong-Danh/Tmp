@@ -5,40 +5,20 @@ import pickle
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-from tensorflow.keras.layers import Layer
+# --- THAY ĐỔI QUAN TRỌNG ---
+# 1. Xóa bỏ hoàn toàn phần "class Attention(Layer): ..." mà chúng ta tự viết.
+# 2. Import trực tiếp lớp Attention chính thức từ thư viện Keras.
+from tensorflow.keras.layers import Attention
 import tensorflow as tf
 
-# --- PHẦN QUAN TRỌNG: ĐỊNH NGHĨA LỚP ATTENTION ---
-# Keras không biết lớp 'Attention' là gì, chúng ta cần định nghĩa nó ở đây.
-# Đây là một kiến trúc Attention phổ biến, rất có thể mô hình của bạn đã dùng nó.
-class Attention(Layer):
-    def __init__(self, **kwargs):
-        super(Attention, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.W = self.add_weight(name="att_weight", shape=(input_shape[-1], 1), initializer="normal")
-        self.b = self.add_weight(name="att_bias", shape=(input_shape[1], 1), initializer="zeros")
-        super(Attention, self).build(input_shape)
-
-    def call(self, x):
-        et = tf.keras.backend.squeeze(tf.keras.backend.tanh(tf.keras.backend.dot(x, self.W) + self.b), axis=-1)
-        at = tf.keras.backend.softmax(et)
-        at = tf.keras.backend.expand_dims(at, axis=-1)
-        output = x * at
-        return tf.keras.backend.sum(output, axis=1)
-
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[-1])
-
-    def get_config(self):
-        return super(Attention, self).get_config()
 
 # --- CÁC HÀM XỬ LÝ ---
 
 # Hàm tải các model và tokenizer (được cache lại để chạy nhanh hơn)
 @st.cache_resource
 def load_all_models():
-    # Khai báo lớp Attention là một custom object
+    # Vẫn cần khai báo custom_objects để Keras biết ánh xạ tên "Attention" 
+    # trong file model tới lớp Attention chính thức vừa import.
     custom_objects = {'Attention': Attention}
     
     # Tải mô hình chính

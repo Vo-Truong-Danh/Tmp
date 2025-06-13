@@ -1,4 +1,9 @@
+# File: requirements.txt
+# Các phiên bản này đã được chọn để đảm bảo tính tương thích và ổn định.
+# Việc chỉ định phiên bản cụ thể giúp môi trường chạy có thể được tái tạo chính xác.
+
 streamlit==1.35.0
-tensorflow==2.13.0 # Phiên bản này đã hỗ trợ Python 3.10
-numpy==1.23.5
-Pillow
+tensorflow==2.15.0
+numpy==1.26.4
+Pillow==10.3.0
+gTTS==2.5.1
